@@ -1,0 +1,236 @@
+6.828 2017 Lecture 8: Isolation mechanisms
+
+Today:
+  user/kernel isolation
+  xv6 system call as case study
+
+* Multiple processes drive the key requirements:
+  multiplexing
+  isolation
+  interaction/sharing
+
+* Isolation is often the most constraining requirement.
+
+* What is isolation?
+  enforced separation to contain effects of failures
+  the process is the usual unit of isolation
+  prevent process X from wrecking or spying on process Y
+    r/w memory, use 100% of CPU, change FDs, &c
+  prevent a process from interfering with the operating system 
+  in the face of malice as well as bugs
+    a bad process may try to trick the h/w or kernel
+
+* the kernel uses hardware mechanisms as part of process isolation:
+  user/kernel mode flag
+  address spaces
+  timeslicing
+  system call interface
+
+* the hardware user/kernel mode flag
+  controls whether instructions can access privileged h/w
+  called CPL on the x86, bottom two bits of %cs register
+    CPL=0 -- kernel mode -- privileged
+    CPL=3 -- user mode -- no privilege
+  x86 CPL protects many processor registers relevant to isolation
+    I/O port accesses
+    control register accesses (eflags, %cs4, ...)
+      including %cs itself
+    affects memory access permissions, but indirectly
+    the kernel must set all this up correctly
+  every serious microprocessor has some kind of user/kernel flag
+  
+* how to do a system call -- switching CPL
+  Q: would this be an OK design for user programs to make a system call:
+    set CPL=0
+    jmp sys_open
+    bad: user-specified instructions with CPL=0
+	这种方案的问题是设置CPL被独立成一条指令，这样该指令必须可被用户模式执行，否则怎么提升CPL进入内核模式。
+	但既然用户模式下即可提升CPL，那用户程序岂不是可以随意执行特权指令了？
+	**所以设置CPL必须作为一条指令的执行步骤之一，然后下一个步骤马上跳入内核代码，不给用户程序在提升CPL后紧接着任意执行特权指令的机会。**
+  Q: how about a combined instruction that sets CPL=0,
+    but *requires* an immediate jump to someplace in the kernel?
+    bad: user might jump somewhere awkward in the kernel
+	但显然也不是可以随便跳到内核中的任何地方，只能跳到内核规定的入口点。
+  the x86 answer:
+    there are only a few permissible kernel entry points ("vectors")
+    INT instruction sets CPL=0 and jumps to an entry point
+    but user code can't otherwise modify CPL or jump anywhere else in kernel
+  system call return sets CPL=3 before returning to user code
+    also a combined instruction (can't separately set CPL and jmp)
+
+* the result: well-defined notion of user vs kernel
+  either CPL=3 and executing user code
+  or CPL=0 and executing from entry point in kernel code
+  not:
+    CPL=0 and executing user code
+    CPL=0 and executing anywhere in kernel the user pleases
+
+* how to isolate process memory?
+  idea: "address space"
+  give each process some memory it can access
+    for its code, variables, heap, stack
+  prevent it from accessing other memory (kernel or other processes)
+
+* how to create isolated address spaces? （借助硬件实现）
+  xv6 uses x86 "paging hardware" in the memory management unit (MMU)
+  MMU translates (or "maps") every address issued by program
+    CPU -> MMU -> RAM
+            |
+         pagetable
+    VA -> PA
+    MMU translates all memory references: user and kernel, instructions and data
+    **instructions use only VAs, never PAs**
+  **kernel sets up a different page table for each process**
+    each process's page table allows access only to that process's RAM
+  
+### Let's look at how xv6 system calls are implemented
+
+xv6 process/stack diagram:
+  user process ; kernel thread
+  user stack ; kernel stack
+  two mechanisms:
+    switch between user/kernel
+    switch between kernel threads
+  trap frame
+  kernel function calls...
+  struct context
+
+* simplified xv6 user/kernel virtual address-space setup
+  FFFFFFFF:
+            ...
+  80000000: kernel
+            user stack
+            user data
+  00000000: user instructions
+  kernel configures MMU to give user code access only to lower half
+  separate address space for each process
+    but **kernel (high) mappings are the same for every process**
+
+system call starting point: 
+  executing in user space, sh writing its prompt
+  sh.asm, write() library function（查看sh.asm，获得write()库函数的地址）
+  break *0xd42
+  x/3i
+    0x10 in eax is the system call number for write
+  info reg
+    cs=0x1b, B=1011 -- CPL=3 => user mode（段寄存器的低两位是RPL, Requester privilege level，即CPL, Current privilege level）
+    esp and eip are low addresses -- user virtual addresses
+  x/4x $esp
+    1 is count
+	0x3f7a is buffer on the stack
+	2 is fd
+    ebf is return address -- in printf （%esp正指向这里，之后INT指令会自动将该%esp值push到内核栈中）
+	（**注意这个返回地址指向调用了用户态系统调用write的printf中call指令的后一条指令，而INT指令推入内核栈的eip指向INT指令的后一条指令**）
+    i.e. write(2, 0x3f7a, 1)
+	（**注意，系统调用有用户态的实现（usys.S:SYSCALL(name)）和内核态的实现，其中用户态实现会执行INT指令**）
+	（**注意用户代码都是先调用了用户态系统调用的实现，然后才进入内核态执行系统调用的内核实现的**）
+	（**注意，INT指令不是call指令，INT指令除了push eip（返回地址）到栈中外，还push其它的一些寄存器，另外注意，INT指令将这些寄存器保存到内核栈而不是用户栈中，也就是在栈切换之后才保存的**）
+  x/c 0x3f7a
+
+INT instruction, kernel entry
+  stepi
+  info reg
+    cs=0x8 -- CPL=0 => kernel mode
+    note INT changed eip and esp to high kernel addresses（注意INT在该改变%eip和%esp值后，切换到内核栈，然后再push %eip和%esp的旧值及其它寄存器值）
+  where is eip?
+    at a kernel-supplied vector -- only place user can go
+    so user program can't jump to random places in kernel with CPL=0
+  x/6wx $esp
+    INT saved a few user registers
+    err, eip, cs, eflags, esp, ss
+  why did INT save just these registers?
+    they are the ones that INT overwrites
+  what INT did:
+    switched to current process's kernel stack
+    saved some user registers on kernel stack
+    set CPL=0
+    start executing at kernel-supplied "vector"
+  where did esp come from?
+    **kernel told h/w what kernel stack to use when creating process**
+
+Q: why does INT bother saving the user state?
+   how much state should be saved?
+   transparency vs speed
+
+saving the rest of the user registers on the kernel stack
+  trapasm.S alltraps
+  pushal pushes 8 registers: eax .. edi
+  x/19x $esp
+  19 words at top of kernel stack:
+    ss
+    esp    -- The saved user %esp points to a saved program counter, and then the first argument.
+    eflags
+    cs
+    eip
+    err    -- INT saved from here up（err和trapno是由vectors.S:vectors[trapno]，即中断处理函数推入的）
+    trapno
+    ds
+    es
+    fs
+    gs
+    eax..edi
+  will eventually be restored, when system call returns
+  meanwhile the kernel C code sometimes needs to read/write saved values
+  struct trapframe in x86.h
+
+Q: why are user registers saved on the kernel stack?
+   why not save them on the user stack?
+
+entering kernel C code
+  the pushl %esp creates an argument for trap(struct trapframe *tf)
+  now we're in trap() in trap.c
+  print tf
+  print *tf
+
+kernel system call handling
+  device interrupts and faults also enter trap()
+  trapno == T_SYSCALL
+  myproc()
+  struct proc in proc.h
+  myproc()->tf -- so syscall() can get at call # and arguments
+  syscall() in syscall.c
+    looks at tf->eax to find out which system call
+  SYS_write in syscalls[] maps to sys_write
+  sys_write() in sysfile.c
+  arg*() read write(fd,buf,n) arguments from the user stack
+  argint() in syscall.c
+    proc->tf->esp + xxx
+
+restoring user registers
+  syscall() sets tf->eax to return value
+  back to trap()
+  finish -- returns to trapasm.S
+  info reg -- still in kernel, registers overwritten by kernel code
+  stepi to iret
+  info reg
+    most registers hold restored user values
+    eax has write() return value of 1
+    esp, eip, cs still have kernel values
+  x/5x $esp
+    saved user state: eip, cs, eflags, esp, ss
+  IRET pops those user registers from the stack
+    and thereby re-enters user space with CPL=3
+
+Q: do we really need IRET?
+   could we use ordinary instructions to restore the registers?
+   也就是将内核栈中的值逐个pop到对应的寄存器中吗？
+   不行，因为如果pop %esp，那么就恢复到用户栈了，之后pop %ss就会出错，除非INT指令将%esp的值第一个push，从而最后才pop %esp。
+   即便这样，最后还得执行返回指令，返回指令隐含地会pop返回地址到%eip中，此时%eip的值是未定义的。
+   could IRET be simpler?
+
+back to user space
+  stepi
+  info reg
+
+* Summary
+ intricate design for User/Kernel transition
+    how bad is a bug in this design?
+	计算机卡死，必须reboot。
+ **kernel must take adversarial view of user process**
+   doesn't trust user stack
+   checks arguments
+ page table confines what memory user program can read/write
+   next lecture
+   
+
+注意，INT指令和IRET指令提升和降低特权级，改变的是物理CPU的特权级，使得CPU能/不能执行特权指令。

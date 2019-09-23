@@ -1,0 +1,82 @@
+
+<!-- saved from url=(0057)https://pdos.csail.mit.edu/6.828/2018/labs/lab4/uvpt.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>UVPT</title>
+<link rel="stylesheet" href="./UVPT_files/labs.css" type="text/css">
+</head>
+<body>
+
+<h1>The UVPT</h1>
+
+<h2>Overview</h2>
+
+A nice conceptual model of the page table is a 2^20-entry array that is
+indexable by a physical page number.  The x86 2-level paging scheme breaks this
+simple model by fragmenting the giant page table into many page tables and one
+page directory.  In the kernel we used <tt>pgdir_walk()</tt> to lookup entries
+by walking down the two-level page table. It would be nice to get the giant
+simple page-table back in some way -- processes in JOS are going to look at it
+to figure out what's going on in their address space.  But how?
+
+<p>This page describes a neat trick that JOS uses by exploiting the paging
+hardware-- the paging hardware is great for putting together a set of fragmented
+pages into a contiguous address space.  And it turns out we already have a table
+with pointers to all of our fragmented page tables: it's the page directory!
+
+</p><p>So, we can use the page <i>directory</i> as a page <i>table</i>
+to map our conceptual giant 2^22-byte page table (represented by 1024
+pages) at some contiguous 2^22-byte range in the virtual address space.
+And we can ensure user processes can't modify their page tables by
+marking the PDE entry as read-only.
+
+</p><p>Puzzle: do we need to create a separate UVPD mapping too?
+
+</p><h2>Detailed explanation</h2>
+
+<p>Remember how the X86 translates virtual addresses into physical ones:
+
+</p><p><img src="./UVPT_files/pagetables.png">
+
+</p><p>CR3 points at the page directory.  The PDX part of the address
+indexes into the page directory to give you a page table.  The
+PTX part indexes into the page table to give you a page, and then
+you add the low bits in.
+
+</p><p>But the processor has no concept of page directories, page tables,
+and pages being anything other than plain memory.  So there's nothing
+that says a particular page in memory can't serve as two or three of
+these at once.  The processor just follows pointers:
+
+pd = lcr3();
+pt = *(pd+4*PDX);
+page = *(pt+4*PTX);
+
+</p><p>Diagramatically, it starts at CR3, follows three arrows, and then stops.
+
+</p><p>If we put a pointer into the page directory that points back to itself at
+index V, as in
+
+</p><p><img src="./UVPT_files/vpt.png">
+
+</p><p>then when we try to translate a virtual address with PDX and PTX
+equal to V, following three arrows leaves us at the page directory.
+So that virtual page translates to the page holding the page directory.
+In Jos, V is 0x3BD, so the virtual address of the UVPD is
+(0x3BD&lt;&lt;22)|(0x3BD&lt;&lt;12).
+
+</p><p>Now, if we try to translate a virtual address with PDX = V but an
+arbitrary PTX != V, then following three arrows from CR3 ends
+one level up from usual (instead of two as in the last case),
+which is to say in the page tables.  So the set of virtual pages
+with PDX=V form a 4MB region whose page contents, as far
+as the processor is concerned, are the page tables themselves.
+In Jos, V is 0x3BD so the virtual address of the UVPT is (0x3BD&lt;&lt;22).
+
+</p><p>So because of the "no-op" arrow we've cleverly inserted into
+the page directory, we've mapped the pages being used as
+the page directory and page table (which are normally virtually
+invisible) into the virtual address space.
+
+
+
+</p><audio controls="controls" style="display: none;"></audio></body><style type="text/css">#yddContainer{display:block;font-family:Microsoft YaHei;position:relative;width:100%;height:100%;top:-4px;left:-4px;font-size:12px;border:1px solid}#yddTop{display:block;height:22px}#yddTopBorderlr{display:block;position:static;height:17px;padding:2px 28px;line-height:17px;font-size:12px;color:#5079bb;font-weight:bold;border-style:none solid;border-width:1px}#yddTopBorderlr .ydd-sp{position:absolute;top:2px;height:0;overflow:hidden}.ydd-icon{left:5px;width:17px;padding:0px 0px 0px 0px;padding-top:17px;background-position:-16px -44px}.ydd-close{right:5px;width:16px;padding-top:16px;background-position:left -44px}#yddKeyTitle{float:left;text-decoration:none}#yddMiddle{display:block;margin-bottom:10px}.ydd-tabs{display:block;margin:5px 0;padding:0 5px;height:18px;border-bottom:1px solid}.ydd-tab{display:block;float:left;height:18px;margin:0 5px -1px 0;padding:0 4px;line-height:18px;border:1px solid;border-bottom:none}.ydd-trans-container{display:block;line-height:160%}.ydd-trans-container a{text-decoration:none;}#yddBottom{position:absolute;bottom:0;left:0;width:100%;height:22px;line-height:22px;overflow:hidden;background-position:left -22px}.ydd-padding010{padding:0 10px}#yddWrapper{color:#252525;z-index:10001;background:url(chrome-extension://eopjamdnofihpioajgfdikhhbobonhbb/ab20.png);}#yddContainer{background:#fff;border-color:#4b7598}#yddTopBorderlr{border-color:#f0f8fc}#yddWrapper .ydd-sp{background-image:url(chrome-extension://eopjamdnofihpioajgfdikhhbobonhbb/ydd-sprite.png)}#yddWrapper a,#yddWrapper a:hover,#yddWrapper a:visited{color:#50799b}#yddWrapper .ydd-tabs{color:#959595}.ydd-tabs,.ydd-tab{background:#fff;border-color:#d5e7f3}#yddBottom{color:#363636}#yddWrapper{min-width:250px;max-width:400px;}</style></html>
