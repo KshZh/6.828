@@ -475,7 +475,9 @@ serve(void)
 }
 ```
 
-其中的Fd对象指向一个File对象，可以有多个不同的Fd对象指向同一个File对象，每个Fd对象有自己的offset：
+注意看上面的注释，**OpenFile连接了Fd和File。Fd是普通用户进程可见的，但OpenFile和File只有文件系统进程可见。**
+
+其中的**Fd对象指向一个OpenFile对象，可以有多个不同的Fd对象指向同一个OpenFile对象，也就是可以有多个不同的Fd对象间接指向同一个File对象，每个Fd对象有自己的offset**：
 
 inc/fd.h:
 
@@ -490,7 +492,7 @@ struct Fd {
 	int fd_omode;
 	union {
 		// File server files
-		struct FdFile fd_file; // 等于其对应的OpenFile对象的o_fileid。
+		struct FdFile fd_file; // 等于其对应的OpenFile对象的o_fileid，即OpenFile对象在opentab表中的下标。
 	};
 };
 ```
